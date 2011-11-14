@@ -13,7 +13,7 @@ setup(
     license = "MIT",
     keywords = "cascading select chain django form chained",
     url = "https://github.com/tdmann/django-chained",
-    packages=['django-chained'],
+    packages=['chained'],
     long_description=read('README.markdown'),
     classifiers=[
         "Development Status :: 3 - Alpha",
