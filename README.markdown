@@ -1,7 +1,7 @@
 Chained
 =======
 
-A cascading selection library for Django.
+A cascading selection app for Django. Also, the exact opposite of the upcoming Tarantino film.
 
 Chain
 -----
