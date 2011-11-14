@@ -15,6 +15,8 @@ class Book(models.Model):
 		return "%s" % self.title
 
 class Chapter(models.Model):
+	class Meta:
+		ordering = ['number']
 	book = models.ForeignKey(Book)
 	number = models.IntegerField()
 	title = models.CharField(max_length=100)

@@ -7,7 +7,7 @@ import re
 from django.db.models import Model, ForeignKey
 from django.db.models.query import QuerySet
 from django.db.models.fields.related import ManyToManyField
-from django.db.models.signals import post_save, post_delete
+from django.db.models.signals import post_save, pre_delete
 
 def _capwords_to_underscore(name):
     return re.sub(r'(?<=[a-z])[A-Z]', r"_\g<0>", name).lower()
@@ -25,49 +25,24 @@ def _get_related_fields(model, target_model):
 
     return relation_fields
 
-class AliasDescriptor(object):
+class ChainLinkInstanceAccessDescriptor(object):
     """
-    Implements the descriptor protocol to allow an object
-    to provide an alias for a target object's methods.
-    """
-
-    def __init__(self, target, member, attached):
+    Exposes a property of the owner ChainLink's related instance
+    """    
+    def __init__(self, member):
         """
-        Creates an alias for the specified member of the
-        target object.
-
-        The target can be a function which will be called
-        when resolving the alias - the function should 
-        return an appropriate object.
-
-        member is the name of the member as a string.
+        Builds the property - member is a string naming the
+        property to be accessed.
         """
-        self.target = target
         self.member = member
-        self.attached = attached
 
-    def _get_target(self):
-        if hasattr(self.target, "__call__"):
-            return self.target()
-        else:
-            return self.target
-    
-    def __call__(self, *args, **kwargs):
-        target = self._get_target()
-        return getattr(target, self.member)(*args, **kwargs)
-
-    def __get__(self, instance, owner):
-        target = self._get_target()
-        return getattr(target, self.member)
+    def __get__(self, instance, type=None):
+        assert instance.instance != None
+        return getattr(instance.instance, self.member)
     
     def __set__(self, instance, value):
-        target = self._get_target()
-        setattr(target, self.member, value)
-
-    def __delete__(self, instance):
-        target = self._get_target()
-        delattr(target, self.member)
-            
+        assert instance.instance != None
+        setattr(instance.instance, self.member, value)       
 
 class BaseChainLink(object):
     """
@@ -92,20 +67,8 @@ class BaseChainLink(object):
         self._child_relation = None
 
         post_save.connect(self._post_save_received, sender=self._meta.model)
-        post_delete.connect(self._post_delete_received, 
+        pre_delete.connect(self._pre_delete_received, 
                 sender=self._meta.model)
-
-        self._create_accessors()
-
-    def _create_accessors(self):
-        # add accessors for members of this 
-        # ChainLink's instance
-        for member in dir(self._meta.model()):
-            attr_name = name = member
-            if hasattr(self, attr_name):
-                attr_name = "instance_%s" % name
-            setattr(self, attr_name, 
-                    AliasDescriptor(lambda: self.instance, name, self))
 
     def _link_child(self, child_link, field=None):
         # links a child to this ChainLink - a specific
@@ -156,7 +119,7 @@ class BaseChainLink(object):
         # upon selection
         pass
 
-    def select_via_get(self, **kwargs):
+    def get_select(self, **kwargs):
         """
         Performs a 'get' to select this link's instance.
         """
@@ -200,9 +163,8 @@ class BaseChainLink(object):
         # to a new object, that there is an object selected
         # on the chainlink above
         # (What about setting a new object on a new object parent?)
-        if not model_instance.pk and \
-                self._parent_link and \
-                not self._parent_link.instance:
+        if model_instance and not model_instance.pk and \
+                self._parent_link and not self._parent_link.instance:
             message  = 'Cannot create a new %s child on unselected %s '
             message += 'ChainLink'
             message  = message % (self._meta.model,
@@ -229,7 +191,7 @@ class BaseChainLink(object):
         or the public key if none is specified
         """
         if self._parent_link:
-            qs = self._parent_link.children
+            qs = self._parent_link.children()
         else:
             qs = self._meta.model.objects.all()
         if not self._meta.model._meta.ordering:
@@ -245,10 +207,10 @@ class BaseChainLink(object):
         qs = self.link_set()
 
         for i, obj in enumerate(qs):
-            if obj == self.instance
+            if obj == self.instance:
                 return i
         
-        if self._parent_link
+        if self._parent_link:
             message = "%s instance %s not found in chained children of %s"
             message = message % (self._meta.model, self.instance, 
                 self._parent_link._meta.model)
@@ -262,9 +224,7 @@ class BaseChainLink(object):
         Finds the next sibling of the currently selected instance.
         """
 
-        assert(self.selected(), 
-                "Cannot find next sibling on unselected ChainLink for %s" % \
-                (self._meta.model))
+        assert self.selected()
 
         qs = self.link_set()
         count = qs.count()
@@ -281,9 +241,7 @@ class BaseChainLink(object):
         """
         Finds the next sibling of the currently selected instance.
         """
-        assert(self.selected(), 
-                "Cannot find previous sibling on unselected ChainLink" + \
-                "for %s" % (self._meta.model))
+        assert self.selected()
 
         qs = self.link_set()
         count = qs.count()
@@ -316,41 +274,17 @@ class BaseChainLink(object):
         if not count:
             return None
         
-        return qs[-1]
+        return qs[qs.count()-1]
 
     def children(self):
         """
         Returns all children of this ChainLink's instance as a QuerySet
         """
-        assert(self.selected(), 
-                "Cannot get children on unselected ChainLink" + \
-                "for %s" % (self._meta.model))
-
+        assert self.selected()
         if not self._child_link:
             return self._meta.model.objects.none()
         
         return getattr(self.instance, self._child_relation).all()
-
-    # implement the descriptor protocol to allow for
-    # funky nice setting of links
-    def __get__(self, instance, owner):
-        return self
-    
-    def __set__(self, instance, value):
-        # Sets a chain link to point to the provided
-        # model instance.
-        if issubclass(value.__class__, Model):
-            self.select(value)
-        elif issubclass(value.__class__, ChainLink):
-            message = 'Cannot replace chain links'
-            raise ValueError(message)
-        else:
-            message = 'Cannot set link to %s instance' % \
-                      (value.__class__.__name__)
-            raise ValueError(message)
-    
-    def __delete__(self, instance):
-        raise AttributeError('Cannot delete a ChainLink')
 
     def _get_first_parent(self):
         # If an instance is selected on this link, return the first
@@ -358,7 +292,7 @@ class BaseChainLink(object):
         if not self.instance:
             return None
         
-        result = getattr(self.instance, self.parent_relation)
+        result = getattr(self.instance, self._parent_relation)
 
         if isinstance(result, QuerySet):
             # if this is a queryset, return the first object
@@ -370,28 +304,21 @@ class BaseChainLink(object):
             # otherwise it should be an object
             return result
 
-    def _get_children(self):
-        # If an instance is selected on this link, return a queryset
-        # of all related child objects
-        if not self.instance:
-            return None
-        
-        return getattr(self.instance, self._child_relation)
-
     def _cascade_from_child(self):
         # select the appropriate instance by examining
         # the child link's instance
 
         # if the child hasn't been saved at all, everything
         # should remain as is so that an object can be added
-        if self._child_link.instance.pk == None:
+        if (self._child_link.instance == None or 
+                self._child_link.instance.pk == None):
             return
 
         # if the child instance is already child of this link's parent
         # instance, we don't cascade up the chain.
-        children = self._get_children()
-        if self._child_link.instance == None or \
-           (children and children.exists(self._child_link.instance)):
+        children = self.children()
+        if (children and 
+                children.filter(pk=self._child_link.instance.pk).exists()):
             return
         
         # otherwise, select the first parent of the child link's instance
@@ -408,7 +335,7 @@ class BaseChainLink(object):
                 self._parent_link.instance.pk == None):
             self.instance = None
         else:
-            children = self._parent_link._get_children()
+            children = self._parent_link.children()
             if children.count() > 0:
                 # if children exist on the parent, select the first
                 self.instance = children[0]
@@ -458,14 +385,40 @@ class BaseChainLink(object):
             if self._parent_link:
                 self._parent_link._cascade_from_child()
             else:
-                self._child_link.cascade_from_parent()
+                self._child_link._cascade_from_parent()
 
     def _pre_delete_received(self, sender, instance, **kwargs):
         # when an object is deleted, we want to make sure
         # we shift selection to a different object
         if not instance == self.instance:
             return
-        self.select_previous()
+
+        select = self.previous_sibling()
+        if not select:
+            select = self.next_sibling()
+        
+        self.select(select)
+
+    # implement the descriptor protocol to allow for
+    # funky nice setting of links
+    def __get__(self, instance, owner):
+        return self
+    
+    def __set__(self, instance, value):
+        # Sets a chain link to point to the provided
+        # model instance.
+        if issubclass(value.__class__, Model):
+            self.select(value)
+        elif issubclass(value.__class__, ChainLink):
+            message = 'Cannot replace chain links'
+            raise ValueError(message)
+        else:
+            message = 'Cannot set link to %s instance' % \
+                      (value.__class__.__name__)
+            raise ValueError(message)
+    
+    def __delete__(self, instance):
+        raise AttributeError('Cannot delete a ChainLink')
 
 class ChainLinkOptions(object):
     def __init__(self, options=None):
@@ -485,57 +438,70 @@ class ChainLinkMetaclass(type):
             return new_class
         options = new_class._meta = ChainLinkOptions(getattr(new_class, 
                 'Meta', None))
+        if options.model:
+            ChainLinkMetaclass.make_attributes(new_class)
         return new_class
-
-class ModelFormChainLinkOptions(ChainLinkOptions):
-    def __init__(self, options=None):
-        self.form_class = getattr(options, 'modelform_class', None)
-        super(ModelFormChainLinkOptions, self).__init__(options)
     
-class ModelFormChainLinkMetaclass(type):
+    def make_attributes(new_class):
+        for member in dir(new_class._meta.model()):
+            attr_name = name = member
+            while hasattr(new_class, attr_name):
+                attr_name = "instance_%s" % name
+            setattr(new_class, attr_name, 
+                    ChainLinkInstanceAccessDescriptor(name))
+
+class FormChainLinkOptions(ChainLinkOptions):
+    def __init__(self, options=None):
+        self.form_class = getattr(options, 'form_class', None)
+        super(FormChainLinkOptions, self).__init__(options)
+    
+class FormChainLinkMetaclass(ChainLinkMetaclass):
     def __new__(cls, name, bases, attrs):
-        new_class = super(ModelFormChainLinkMetaclass, cls).__new__(cls, 
+        new_class = super(FormChainLinkMetaclass, cls).__new__(cls, 
                 name, bases, attrs)
-        # make sure we aren't defining ModelFormChainLink itself
+        # make sure we aren't defining FormChainLink itself
         try:
-            parents = [b for b in bases if issubclass(b, ModelFormChainLink)]
+            parents = [b for b in bases if issubclass(b, FormChainLink)]
         except NameError:
             return new_class
-        options = new_class._meta = ModelFormChainLinkOptions(
+        options = new_class._meta = FormChainLinkOptions(
                 getattr(new_class,'Meta', None))
         return new_class
 
 class ChainLink(BaseChainLink):
     __metaclass__ = ChainLinkMetaclass
 
-class ModelFormChainLink(BaseChainLink):
-    __metaclass__ = ModelFormChainLinkMetaclass
+class FormChainLink(BaseChainLink):
+    __metaclass__ = FormChainLinkMetaclass
 
     def __init__(self, chain):
         """
         Allows a chain to associate model forms with 
         each level of this Chain.
         """
+        super(FormChainLink, self).__init__(chain)
         self._form = None
     
     def _did_select(self):
         if not self.instance:
             self._form = None
         else:
-            self._form = self._meta.model_form_class(instance=self.instance)
+            self._form = self._meta.form_class(instance=self.instance)
 
     def save_form_data(self, data=None, files=None, commit=True):
         """
-        Saves form data to the currently selected instance, or,
-        if no instance is selected, saves the form data to a new
-        instance and sets the appropriate parent.
+        Saves form data.
         """
-        form = self._meta.model_form_class(data=data, files=files, 
+        form = self._meta.form_class(data=data, files=files, 
                 instance=self.instance)
-        if self.instance:
-            self.instance = form.save(commit=commit)
-        else:
-            self.instance = form.save(commit=commit)
+        self.instance = form.save(commit=commit)
+
+        # save this instance to make sure we hook up to a parent.
+        self.instance.save()
+    
+    @property
+    def form(self):
+        return self._form
 
 class BaseChain(object):
     """
@@ -633,32 +599,32 @@ class ChainMetaclass(type):
 
         return new_class
 
-class ModelFormChainOptions(ChainOptions):
+class FormChainOptions(ChainOptions):
     def __init__(self, options=None):
-        self.model_form_classes = getattr(options, 
-                'model_form_classes', None)
-        super(ModelFormChainOptions, self).__init__(options)
+        self.form_classes = getattr(options, 
+                'form_classes', None)
+        super(FormChainOptions, self).__init__(options)
 
-class ModelFormChainMetaclass(type):
+class FormChainMetaclass(type):
     def __new__(cls, name, bases, attrs):
-        new_class = super(ModelFormChainMetaclass, cls).__new__(cls, name,
+        new_class = super(FormChainMetaclass, cls).__new__(cls, name,
                 bases, attrs)
         
-        # check if we're building ModelFormChain
+        # check if we're building FormChain
         try:
-            parents = [b for b in bases if issubclass(ModelFormChain, b)]
+            parents = [b for b in bases if issubclass(FormChain, b)]
         except NameError:
             return new_class
 
         # build the class based off options
-        options = new_class._meta = ModelFormChainOptions(getattr(new_class, 'Meta', 
-                None))
+        options = new_class._meta = FormChainOptions(getattr(new_class, 
+                'Meta', None))
         new_class._meta.links = []
 
         # make accessors for each
         if options.models:
-            for model, model_form_class in zip(options.models, 
-                    options.model_form_classes):
+            for model, form_class in zip(options.models, 
+                    options.form_classes):
                 key = None
                 if isinstance(model, tuple) and len(model) == 2:
                     # if we're looking at a tuple, split it and  
@@ -669,13 +635,13 @@ class ModelFormChainMetaclass(type):
                     key = _capwords_to_underscore(model.__name__)
 
                 chain_link_meta = type('Meta', (object,), dict(model=model, 
-                        model_form_class=model_form_class))
+                        form_class=form_class))
 
                 chain_link_dict = dict(Meta=chain_link_meta)
 
                 # create an appropriate link class
                 link_class = type('ChainLink_%s' % key, 
-                        (ModelFormChainLink,), 
+                        (FormChainLink,), 
                         chain_link_dict)
 
                 # add the link to the meta class
@@ -685,5 +651,5 @@ class ModelFormChainMetaclass(type):
 class Chain(BaseChain):
     __metaclass__ = ChainMetaclass
 
-class ModelFormChain(BaseChain):
-    __metaclass__ = ModelFormChainMetaclass
+class FormChain(BaseChain):
+    __metaclass__ = FormChainMetaclass
