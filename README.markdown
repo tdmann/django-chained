@@ -10,6 +10,7 @@ A class that links models together.
 It's defined like this:
 
 _library.chains_
+
 ```python
 from chained import Chain
 from library.models import Author, Book, Chapter
@@ -26,6 +27,7 @@ Each of these ChainLinks exposes the members of the related model, along with se
 For example, the above class would be used like this:
 
 _library.views_
+
 ```python
 from library.chains import LibraryChain
 
@@ -42,6 +44,7 @@ def get_dinosaur_book(request):
 ```
 
 _library/book_info.html_
+
 ```html
 <html>
 	<head>
@@ -63,6 +66,7 @@ FormChain
 Links ModelForms together, but it exposes a property called 'form'. It is defined like so:
 
 _library.chains_
+
 ```python
 from chained import FormChain
 from library.models import Author, Book, Chapter
