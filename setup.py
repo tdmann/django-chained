@@ -6,7 +6,7 @@ def read(fname):
 
 setup(
     name = "django-chained",
-    version = "0.1",
+    version = "0.1.1",
     author = "Tim Mann",
     author_email = "tdmann@whaba.mn",
     description = ("A cascading selection app for Django."),
