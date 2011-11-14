@@ -75,6 +75,11 @@ class ChainTests(TestCase):
 
 		self.libraryChain.author.delete()
 		self.assertEquals(self.libraryChain.author.instance, Author.objects.get(last_name="Cross"))
+	
+	def testIterate(self):
+		for link, other_ref in zip(self.libraryChain, self.libraryChain._links_list):
+			self.assertEquals(link, other_ref)
+
 
 class FormChainTests(TestCase):
 	"""

@@ -552,6 +552,10 @@ class BaseChain(object):
     def _connect_links(self, parent, child):
         # Connect the parent and child links
         parent._link_child(child)
+    
+    def __iter__(self):
+        for link in self._links_list:
+            yield link
 
 
 # These Chain Metaclasses can probably be refactored to better fit
