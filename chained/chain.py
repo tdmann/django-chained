@@ -224,7 +224,8 @@ class BaseChainLink(object):
         Finds the next sibling of the currently selected instance.
         """
 
-        assert self.selected()
+        if not self.saved_selected():
+            return None
 
         qs = self.link_set()
         count = qs.count()
@@ -241,7 +242,8 @@ class BaseChainLink(object):
         """
         Finds the next sibling of the currently selected instance.
         """
-        assert self.selected()
+        if not self.saved_selected():
+            return None
 
         qs = self.link_set()
         count = qs.count()
