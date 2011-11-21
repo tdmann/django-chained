@@ -1,9 +1,10 @@
 """
-Chain core classes - allows cascading selection and editing of
+chain - allows cascading selection and editing of
 models linked by foreign keys.
 """
 
 import re
+from django.core.exceptions import ObjectDoesNotExist
 from django.db.models import Model, ForeignKey
 from django.db.models.query import QuerySet
 from django.db.models.fields.related import ManyToManyField
@@ -37,12 +38,12 @@ class ChainLinkInstanceAccessDescriptor(object):
         self.member = member
 
     def __get__(self, instance, type=None):
-        assert instance.instance != None
-        return getattr(instance.instance, self.member)
+        assert instance._instance != None
+        return getattr(instance._instance, self.member)
     
     def __set__(self, instance, value):
-        assert instance.instance != None
-        setattr(instance.instance, self.member, value)       
+        assert instance._instance != None
+        setattr(instance._instance, self.member, value)       
 
 class BaseChainLink(object):
     """
@@ -52,12 +53,13 @@ class BaseChainLink(object):
     save, create, delete, and select objects which exist on the tied 
     model.
     """
-    def __init__(self, chain=None):
+    def __init__(self, chain=None, accessor_name=''):
         """
         Create a ChainLink for the specified chain.
         """
+        self._accessor_name = accessor_name
         self._chain = chain
-        self.instance = None
+        self._instance = None
 
         self._parent_link = None
         self._parent_relation = None
@@ -114,7 +116,7 @@ class BaseChainLink(object):
         self._child_link = child_link
         child_link._parent_link = self
 
-    def _did_select(self):
+    def did_select(self):
         # a method for adding special processing to ChainLinks
         # upon selection
         pass
@@ -164,25 +166,46 @@ class BaseChainLink(object):
         # on the chainlink above
         # (What about setting a new object on a new object parent?)
         if model_instance and not model_instance.pk and \
-                self._parent_link and not self._parent_link.instance:
+                self._parent_link and not self._parent_link._instance:
             message  = 'Cannot create a new %s child on unselected %s '
             message += 'ChainLink'
             message  = message % (self._meta.model,
                     self._parent_link._meta.model)
             raise ValueError(message)
         
-        self.instance = model_instance
+        self._instance = model_instance
         if self._parent_link:
             self._parent_link._cascade_from_child()
         if self._child_link:
             self._child_link._cascade_from_parent()
-        self._did_select()
+        
+        # make sure that the parent link is set correctly, but only
+        # on non-m2m relations (because m2m must be saved)
+        if (self._parent_link and
+                self._parent_link.selected() and 
+                not self._parent_relation_is_m2m and
+                self._instance):
+            try:
+                equal = self.parent() == self._parent_link.instance
+            except ObjectDoesNotExist:
+                equal = False
+            if not equal:
+                setattr(self._instance, self._parent_relation, self._parent_link.instance)
+
+        self.chain.did_select()
 
     def selected(self):
         """
         Returns true if this object has an instance set.
         """
-        return self.instance != None
+        return self._instance != None
+    
+    def saved_selected(self):
+        """
+        Returns true if this object has an instance set and
+        that instance is actually saved.
+        """
+        return self._instance != None and self._instance.pk != None
 
     def link_set(self):
         """
@@ -207,16 +230,16 @@ class BaseChainLink(object):
         qs = self.link_set()
 
         for i, obj in enumerate(qs):
-            if obj == self.instance:
+            if obj == self._instance:
                 return i
         
         if self._parent_link:
             message = "%s instance %s not found in chained children of %s"
-            message = message % (self._meta.model, self.instance, 
+            message = message % (self._meta.model, self._instance, 
                 self._parent_link._meta.model)
         else:
             message = "%s instance %s not found - no index."
-            message = message % (self._meta.model, self.instance)
+            message = message % (self._meta.model, self._instance)
         raise KeyError(message)
 
     def next_sibling(self, **kwargs):
@@ -278,6 +301,12 @@ class BaseChainLink(object):
         
         return qs[qs.count()-1]
 
+    def parent(self):
+        """
+        Returns the parent of this object.
+        """
+        return self._get_first_parent()
+
     def children(self):
         """
         Returns all children of this ChainLink's instance as a QuerySet
@@ -286,15 +315,15 @@ class BaseChainLink(object):
         if not self._child_link:
             return self._meta.model.objects.none()
         
-        return getattr(self.instance, self._child_relation).all()
+        return getattr(self._instance, self._child_relation).all()
 
     def _get_first_parent(self):
         # If an instance is selected on this link, return the first
         # related object of the parent_link's type.
-        if not self.instance:
+        if not self._instance:
             return None
         
-        result = getattr(self.instance, self._parent_relation)
+        result = getattr(self._instance, self._parent_relation)
 
         if isinstance(result, QuerySet):
             # if this is a queryset, return the first object
@@ -312,20 +341,20 @@ class BaseChainLink(object):
 
         # if the child hasn't been saved at all, everything
         # should remain as is so that an object can be added
-        if (self._child_link.instance == None or 
-                self._child_link.instance.pk == None):
+        if (self._child_link._instance == None or 
+                self._child_link._instance.pk == None):
             return
 
         # if the child instance is already child of this link's parent
         # instance, we don't cascade up the chain.
         children = self.children()
         if (children and 
-                children.filter(pk=self._child_link.instance.pk).exists()):
+                children.filter(pk=self._child_link._instance.pk).exists()):
             return
         
         # otherwise, select the first parent of the child link's instance
         # and update the next parent link
-        self.instance = self._child_link._get_first_parent()
+        self._instance = self._child_link._get_first_parent()
         if self._parent_link:
             self._parent_link._cascade_from_child()
     
@@ -333,23 +362,23 @@ class BaseChainLink(object):
         # select the appropriate child by examining
         # the parent link's instance
 
-        if (self._parent_link.instance == None or 
-                self._parent_link.instance.pk == None):
-            self.instance = None
+        if (self._parent_link._instance == None or 
+                self._parent_link._instance.pk == None):
+            self._instance = None
         else:
             children = self._parent_link.children()
             if children.count() > 0:
                 # if children exist on the parent, select the first
-                self.instance = children[0]
+                self._instance = children[0]
             else:
                 # automatically create and select (but don't save)
                 # a new instance of this link's model if
                 # auto_create_defaults is set
                 if self._chain.auto_create_defaults:
-                    self.instance = model()
+                    self._instance = model()
                 else:
-                    self.instance = None
-        
+                    self._instance = None
+
         # update this link's child link
         if self._child_link:
             self._child_link._cascade_from_parent()
@@ -359,24 +388,25 @@ class BaseChainLink(object):
         # its parent is set if it was just created, or
         # cascade from this object to select correct objects
         # in the case of a move
-        if not instance == self.instance:
+        if not instance == self._instance:
             return
 
         # set parents on newly saved instances
-        if created and self._parent_link:
+        if created and self._parent_link and self._parent_relation_is_m2m:
             # make sure we don't get stuck in a signal loop
             post_save.disconnect(self._post_save_received, self._meta.model)
 
             # on m2m relations we need to add parents, not set them
             if self._parent_relation_is_m2m:
-                related_set = getattr(self.instance, self._parent_relation)
-                related_set.add(self._parent_link.instance)
+                related_set = getattr(self._instance, self._parent_relation)
+                related_set.add(self._parent_link._instance)
             else:
-                setattr(self.instance, self._parent_relation, 
-                    self._parent_link.instance)
+                setattr(self._instance, self._parent_relation, 
+                    self._parent_link._instance)
 
             # save changes and reset the signal listener
-            self.instance.save()
+            self._instance.save()
+            self._chain.did_select()
             post_save.connect(self._post_save_received, 
                     sender=self._meta.model)
         
@@ -386,13 +416,15 @@ class BaseChainLink(object):
         if not created:
             if self._parent_link:
                 self._parent_link._cascade_from_child()
-            else:
+            if self._child_link:
                 self._child_link._cascade_from_parent()
+            
+            self._chain.did_select()
 
     def _pre_delete_received(self, sender, instance, **kwargs):
         # when an object is deleted, we want to make sure
         # we shift selection to a different object
-        if not instance == self.instance:
+        if not instance == self._instance:
             return
 
         select = self.previous_sibling()
@@ -421,6 +453,49 @@ class BaseChainLink(object):
     
     def __delete__(self, instance):
         raise AttributeError('Cannot delete a ChainLink')
+
+    @property
+    def chain(self):
+        '''
+        The chain which this link is attached to.
+        '''
+        return self._chain
+
+    @property
+    def instance(self):
+        '''
+        The currently selected instance of this ChainLink.
+        '''
+        return self._instance
+    
+    @property
+    def accessor_name(self):
+        '''
+        The accessor name for this ChainLink on its
+        parent chain.
+        '''
+        return self._accessor_name
+
+    @property
+    def model(self):
+        '''
+        The model for this ChainLink.
+        '''
+        return self._meta.model
+    
+    @property
+    def parent_link(self):
+        '''
+        The parent link for this ChainLink.
+        '''
+        return self._parent_link
+    
+    @property
+    def child_link(self):
+        '''
+        The child link for this ChainLink.
+        '''
+        return self._child_link
 
 class ChainLinkOptions(object):
     def __init__(self, options=None):
@@ -476,34 +551,59 @@ class ChainLink(BaseChainLink):
 class FormChainLink(BaseChainLink):
     __metaclass__ = FormChainLinkMetaclass
 
-    def __init__(self, chain):
+    def __init__(self, chain, accessor_name):
         """
         Allows a chain to associate model forms with 
         each level of this Chain.
         """
-        super(FormChainLink, self).__init__(chain)
+        super(FormChainLink, self).__init__(chain, accessor_name)
         self._form = None
     
-    def _did_select(self):
-        if not self.instance:
-            self._form = None
+    def did_select(self):
+        """
+        Called after the chain finishes a selection process - 
+        for the FormChainLink, we make sure that the _form
+        member provides a Form instance for the selected
+        instance.
+        """
+        super(FormChainLink, self).did_select()
+        if not self._instance:
+            self._form = self._meta.form_class(instance=None)
         else:
-            self._form = self._meta.form_class(instance=self.instance)
+            self._form = self._meta.form_class(instance=self._instance)
 
     def save_form_data(self, data=None, files=None, commit=True):
         """
-        Saves form data.
+        Saves form data on this level of the chain.
+        If an instance is selected on this level, it is
+        saved to.
         """
         form = self._meta.form_class(data=data, files=files, 
-                instance=self.instance)
-        self.instance = form.save(commit=commit)
+                instance=self._instance)
+        
+        if form.is_valid():
+            instance_from_form = form.save(commit=False)
 
-        # save this instance to make sure we hook up to a parent.
-        self.instance.save()
+            # issue a save to make sure that m2m
+            # relationships are set right
+            if commit:
+                instance_from_form.save()
+            
+            # following the potential save,
+            # select the object
+            self.select(instance_from_form)
+            return True
+        else:
+            self._form = form
+            return False
     
     @property
     def form(self):
         return self._form
+
+    @property
+    def form_class(self):
+        return self._meta.form_class
 
 class BaseChain(object):
     """
@@ -528,7 +628,7 @@ class BaseChain(object):
         self._links_list = []
 
         for key, link_class in self._meta.links:
-            new_link = link_class(chain=self)
+            new_link = link_class(chain=self, accessor_name=key)
             self._links.update({key: new_link})
         
             # link to the last link
@@ -544,6 +644,13 @@ class BaseChain(object):
         
         self.select_first()
 
+    def did_select(self):
+        """
+        Called when a selection has finished propogating.
+        """
+        for link in self:
+                link.did_select()
+
     def select_first(self):
         """
         Selects the first object available for each link in the chain.
@@ -558,13 +665,19 @@ class BaseChain(object):
     def __iter__(self):
         for link in self._links_list:
             yield link
-
+    
+    def __len__(self):
+        return len(self._links_list)
+    
+    def __getitem__(self, key):
+        return self._links_list[key]
 
 # These Chain Metaclasses can probably be refactored to better fit
 # DRY principles.
 class ChainOptions(object):
     def __init__(self, options=None):
         self.models = getattr(options, 'models', None)
+        self.chain_link_class = getattr(options, 'chain_link_class', None)
         
 class ChainMetaclass(type):
     def __new__(cls, name, bases, attrs):
@@ -596,7 +709,7 @@ class ChainMetaclass(type):
 
                 # create an appropriate link class
                 link_class = type('ChainLink_%s' % key, 
-                        (ChainLink,), 
+                        (options.chain_link_class or ChainLink,), 
                         dict(Meta=type('Meta', (object,), 
                                 dict(model=model))))
 
@@ -647,7 +760,7 @@ class FormChainMetaclass(type):
 
                 # create an appropriate link class
                 link_class = type('ChainLink_%s' % key, 
-                        (FormChainLink,), 
+                        (options.chain_link_class or FormChainLink,), 
                         chain_link_dict)
 
                 # add the link to the meta class
