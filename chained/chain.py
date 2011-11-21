@@ -195,7 +195,7 @@ class BaseChainLink(object):
         else:
             qs = self._meta.model.objects.all()
         if not self._meta.model._meta.ordering:
-            qs.order_by("pk")
+            qs = qs.order_by("pk")
         return qs
         
     def index(self):
