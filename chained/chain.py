@@ -7,7 +7,7 @@ import re
 from django.core.exceptions import ObjectDoesNotExist
 from django.db.models import Model, ForeignKey
 from django.db.models.query import QuerySet
-from django.db.models.fields.related import ManyToManyField
+from django.db.models.fields.related import ManyToManyField, OneToOneField
 from django.db.models.signals import post_save, pre_delete
 
 def _capwords_to_underscore(name):
@@ -38,11 +38,13 @@ class ChainLinkInstanceAccessDescriptor(object):
         self.member = member
 
     def __get__(self, instance, type=None):
-        assert instance._instance != None
+        if not instance._instance:
+            raise AttributeError('Cannot access %s on ChainLink with no instance' % self.member)
         return getattr(instance._instance, self.member)
     
     def __set__(self, instance, value):
-        assert instance._instance != None
+        if not instance._instance:
+            raise AttributeError('Cannot write %s on ChainLink with no instance' % self.member)
         setattr(instance._instance, self.member, value)       
 
 class BaseChainLink(object):
@@ -67,6 +69,7 @@ class BaseChainLink(object):
 
         self._child_link = None
         self._child_relation = None
+        self._child_relation_is_o2o = False
 
         post_save.connect(self._post_save_received, sender=self._meta.model)
         pre_delete.connect(self._pre_delete_received, 
@@ -112,6 +115,8 @@ class BaseChainLink(object):
         
         child_link._parent_relation_is_m2m = isinstance(field,
                 ManyToManyField)
+        
+        self._child_relation_is_o2o = isinstance(field, OneToOneField)
 
         self._child_link = child_link
         child_link._parent_link = self
@@ -281,7 +286,7 @@ class BaseChainLink(object):
     
     def first(self, **kwargs):
         """
-        Finds the first sibling of the currently selected instance.
+        Finds the first item on this level of the chain.
         """
         qs = self.link_set()
         count = qs.count()
@@ -292,7 +297,7 @@ class BaseChainLink(object):
 
     def last(self, **kwargs):
         """
-        Finds the last sibling of the currently selected instance.
+        Finds the last item on this level of the chain.
         """
         qs = self.link_set()
         count = qs.count()
@@ -314,8 +319,10 @@ class BaseChainLink(object):
         assert self.selected()
         if not self._child_link:
             return self._meta.model.objects.none()
-        
-        return getattr(self._instance, self._child_relation).all()
+        if not self._child_relation_is_o2o:
+            return getattr(self._instance, self._child_relation).all()
+        else:
+            return self._child_link._meta.model.objects.filter(pk=getattr(self._instance, self._child_relation).pk)
 
     def _get_first_parent(self):
         # If an instance is selected on this link, return the first
@@ -568,9 +575,9 @@ class FormChainLink(BaseChainLink):
         """
         super(FormChainLink, self).did_select()
         if not self._instance:
-            self._form = self._meta.form_class(instance=None)
+            self._form = self._meta.form_class(instance=None, auto_id="%s_%%s" % self.accessor_name)
         else:
-            self._form = self._meta.form_class(instance=self._instance)
+            self._form = self._meta.form_class(instance=self._instance, auto_id="%s_%%s" % self.accessor_name)
 
     def save_form_data(self, data=None, files=None, commit=True):
         """
@@ -579,7 +586,7 @@ class FormChainLink(BaseChainLink):
         saved to.
         """
         form = self._meta.form_class(data=data, files=files, 
-                instance=self._instance)
+                instance=self._instance, auto_id="%s_%%s" % self.accessor_name)
         
         if form.is_valid():
             instance_from_form = form.save(commit=False)
