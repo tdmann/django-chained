@@ -316,8 +316,7 @@ class BaseChainLink(object):
         """
         Returns all children of this ChainLink's instance as a QuerySet
         """
-        assert self.selected()
-        if not self._child_link:
+        if not self.selected() or not self._child_link:
             return self._meta.model.objects.none()
         if not self._child_relation_is_o2o:
             return getattr(self._instance, self._child_relation).all()
